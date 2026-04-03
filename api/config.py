@@ -123,7 +123,7 @@ def update_config(body: ConfigUpdate):
 
 @router.post("/applemail/import")
 def import_applemail_pool(body: AppleMailImportRequest):
-    from core.applemail_pool import save_applemail_pool_json
+    from core.applemail_pool import load_applemail_pool_snapshot, save_applemail_pool_json
 
     pool_dir = str(body.pool_dir or config_store.get("applemail_pool_dir", "mail")).strip() or "mail"
     result = save_applemail_pool_json(
@@ -140,8 +140,43 @@ def import_applemail_pool(body: AppleMailImportRequest):
             }
         )
 
+    snapshot = load_applemail_pool_snapshot(
+        pool_file=result["filename"],
+        pool_dir=pool_dir,
+    )
+
     return {
         **result,
         "pool_dir": pool_dir,
         "bound_to_config": body.bind_to_config,
+        "items": snapshot["items"],
+        "truncated": snapshot["truncated"],
+    }
+
+
+@router.get("/applemail/pool")
+def get_applemail_pool_snapshot(
+    pool_dir: str = "",
+    pool_file: str = "",
+):
+    from core.applemail_pool import load_applemail_pool_snapshot
+
+    resolved_pool_dir = str(pool_dir or config_store.get("applemail_pool_dir", "mail")).strip() or "mail"
+    resolved_pool_file = str(pool_file or config_store.get("applemail_pool_file", "")).strip()
+    try:
+        snapshot = load_applemail_pool_snapshot(
+            pool_file=resolved_pool_file,
+            pool_dir=resolved_pool_dir,
+        )
+    except Exception:
+        snapshot = {
+            "filename": resolved_pool_file,
+            "path": "",
+            "count": 0,
+            "items": [],
+            "truncated": False,
+        }
+    return {
+        **snapshot,
+        "pool_dir": resolved_pool_dir,
     }

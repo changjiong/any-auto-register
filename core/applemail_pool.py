@@ -210,6 +210,31 @@ def load_applemail_pool_records(
     return path, records
 
 
+def load_applemail_pool_snapshot(
+    *,
+    pool_file: str | None = None,
+    pool_dir: str | None = None,
+    preview_limit: int = 100,
+) -> dict[str, Any]:
+    path, records = load_applemail_pool_records(pool_file=pool_file, pool_dir=pool_dir)
+    limit = max(int(preview_limit or 0), 0)
+    items = [
+        {
+            "index": idx,
+            "email": record["email"],
+            "mailbox": record.get("mailbox") or "INBOX",
+        }
+        for idx, record in enumerate(records[:limit], start=1)
+    ]
+    return {
+        "filename": path.name,
+        "path": str(path),
+        "count": len(records),
+        "items": items,
+        "truncated": len(records) > limit if limit > 0 else len(records) > 0,
+    }
+
+
 def take_next_applemail_record(
     *,
     pool_file: str | None = None,

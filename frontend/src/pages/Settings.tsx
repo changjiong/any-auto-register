@@ -352,6 +352,20 @@ interface TabConfig {
   sections: SectionConfig[]
 }
 
+interface AppleMailPoolPreviewItem {
+  index: number
+  email: string
+  mailbox: string
+}
+
+interface AppleMailPoolSnapshot {
+  filename: string
+  pool_dir: string
+  count: number
+  items: AppleMailPoolPreviewItem[]
+  truncated: boolean
+}
+
 function formatResultText(data: unknown) {
   if (typeof data === 'string') return data
   try {
@@ -573,10 +587,37 @@ function AppleMailPoolImportSection({ form }: { form: any }) {
   const [content, setContent] = useState('')
   const [filename, setFilename] = useState('')
   const [importing, setImporting] = useState(false)
+  const [snapshot, setSnapshot] = useState<AppleMailPoolSnapshot | null>(null)
+  const [loadingSnapshot, setLoadingSnapshot] = useState(false)
+  const watchedPoolDir = Form.useWatch('applemail_pool_dir', form) || 'mail'
+  const watchedPoolFile = Form.useWatch('applemail_pool_file', form) || ''
+
+  const loadSnapshot = async () => {
+    setLoadingSnapshot(true)
+    try {
+      const params = new URLSearchParams()
+      if (String(watchedPoolDir || '').trim()) {
+        params.set('pool_dir', String(watchedPoolDir || '').trim())
+      }
+      if (String(watchedPoolFile || '').trim()) {
+        params.set('pool_file', String(watchedPoolFile || '').trim())
+      }
+      const result = await apiFetch(`/config/applemail/pool?${params.toString()}`)
+      setSnapshot(result)
+    } catch {
+      setSnapshot(null)
+    } finally {
+      setLoadingSnapshot(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadSnapshot()
+  }, [watchedPoolDir, watchedPoolFile])
 
   const handleImport = async () => {
     if (!content.trim()) {
-      message.error('请输入 JSON 内容')
+      message.error('请输入 JSON 或 TXT 内容')
       return
     }
 
@@ -598,12 +639,19 @@ function AppleMailPoolImportSection({ form }: { form: any }) {
         applemail_pool_dir: result.pool_dir,
         applemail_pool_file: result.filename,
       })
+      setSnapshot({
+        filename: result.filename,
+        pool_dir: result.pool_dir,
+        count: result.count,
+        items: result.items || [],
+        truncated: Boolean(result.truncated),
+      })
       setContent('')
       setFilename('')
-      message.success(`AppleMail JSON 导入成功，共 ${result.count} 条，已绑定 ${result.filename}`)
+      message.success(`导入成功，共 ${result.count} 个邮箱，已绑定 ${result.filename}`)
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'AppleMail JSON 导入失败'
-      message.error(errorMessage || 'AppleMail JSON 导入失败')
+      const errorMessage = error instanceof Error ? error.message : 'AppleMail 内容导入失败'
+      message.error(errorMessage || 'AppleMail 内容导入失败')
     } finally {
       setImporting(false)
     }
@@ -611,13 +659,13 @@ function AppleMailPoolImportSection({ form }: { form: any }) {
 
   return (
     <Card
-      title="AppleMail JSON 导入"
-      extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>导入后会自动写入 mail 目录并绑定为当前邮箱池文件</span>}
+      title="AppleMail 内容导入"
+      extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>支持 JSON 或 TXT；导入后自动绑定当前邮箱池文件</span>}
       style={{ marginBottom: 16 }}
     >
       <Space direction="vertical" style={{ width: '100%' }} size={12}>
         <Typography.Text type="secondary">
-          支持数组或对象包装结构，常见字段别名如 `clientId` / `refreshToken` / `folder` 会自动规范化成 `client_id` / `refresh_token` / `mailbox`。
+          支持数组/对象 JSON，也支持 `mail/*.txt` 那种每行一条的 `email----password----client_id----refresh_token` 格式。常见字段别名如 `clientId` / `refreshToken` / `folder` 会自动规范化。
         </Typography.Text>
         <Input
           value={filename}
@@ -628,12 +676,61 @@ function AppleMailPoolImportSection({ form }: { form: any }) {
           value={content}
           onChange={(event) => setContent(event.target.value)}
           rows={10}
-          placeholder={'[\n  {\n    "email": "demo@example.com",\n    "clientId": "xxxx",\n    "refreshToken": "xxxx",\n    "folder": "INBOX"\n  }\n]'}
+          placeholder={'[\n  {\n    "email": "demo@example.com",\n    "clientId": "xxxx",\n    "refreshToken": "xxxx",\n    "folder": "INBOX"\n  }\n]\n\n或粘贴 TXT:\ndemo@example.com----password----client_id----refresh_token'}
           style={{ fontFamily: 'monospace' }}
         />
-        <Button type="primary" onClick={handleImport} loading={importing}>
-          导入 JSON 到邮箱池
-        </Button>
+        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+          <Button
+            danger
+            onClick={() => {
+              setContent('')
+              setFilename('')
+            }}
+          >
+            清空
+          </Button>
+          <Space>
+            <Button onClick={() => void loadSnapshot()} loading={loadingSnapshot}>
+              刷新预览
+            </Button>
+            <Button type="primary" onClick={handleImport} loading={importing}>
+              确认导入
+            </Button>
+          </Space>
+        </Space>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <Tag color="blue">已导入: {snapshot?.count || 0} 个邮箱</Tag>
+          {snapshot?.filename ? <Typography.Text type="secondary">当前文件: {snapshot.filename}</Typography.Text> : null}
+        </div>
+
+        <div
+          style={{
+            border: '1px solid rgba(127,127,127,0.25)',
+            borderRadius: 8,
+            padding: 12,
+            background: 'rgba(127,127,127,0.06)',
+            minHeight: 88,
+            maxHeight: 260,
+            overflowY: 'auto',
+            fontFamily: 'monospace',
+            fontSize: 13,
+            lineHeight: 1.7,
+          }}
+        >
+          {snapshot?.items?.length ? (
+            snapshot.items.map((item) => (
+              <div key={`${item.index}-${item.email}`}>
+                {item.index}. {item.email}
+              </div>
+            ))
+          ) : (
+            <Typography.Text type="secondary">当前还没有可预览的邮箱池内容。</Typography.Text>
+          )}
+        </div>
+        {snapshot?.truncated ? (
+          <Typography.Text type="secondary">预览只展示前 100 个邮箱，完整内容以文件为准。</Typography.Text>
+        ) : null}
       </Space>
     </Card>
   )
