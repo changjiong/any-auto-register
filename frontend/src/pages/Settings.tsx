@@ -14,13 +14,18 @@ import {
   LockOutlined,
 } from '@ant-design/icons'
 import { parseBooleanConfigValue } from '@/lib/configValueParsers'
+import MailImportPanel from '@/components/settings/MailImportPanel'
 import { apiFetch } from '@/lib/utils'
+
+function resolveEffectiveMailProvider(mailProvider: string, mailImportSource: string) {
+  if (mailProvider !== 'mail_import') return mailProvider
+  return mailImportSource === 'applemail' ? 'applemail' : 'microsoft'
+}
 
 const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
   mail_provider: [
     { label: 'LuckMail（订单接码 / 已购邮箱）', value: 'luckmail' },
-    { label: 'Outlook（本地导入）', value: 'outlook' },
-    { label: 'AppleMail（小苹果 / 本地邮箱池）', value: 'applemail' },
+    { label: '邮箱导入', value: 'mail_import' },
     { label: 'Laoudo（固定邮箱）', value: 'laoudo' },
     { label: 'TempMail.lol（自动生成）', value: 'tempmail_lol' },
     { label: 'SkyMail（CloudMail 接口）', value: 'skymail' },
@@ -48,6 +53,16 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: '本地 Solver (Camoufox)', value: 'local_solver' },
     { label: '手动', value: 'manual' },
   ],
+  outlook_backend: [
+    { label: 'Graph（默认）', value: 'graph' },
+    { label: 'IMAP', value: 'imap' },
+  ],
+  luckmail_email_type: [
+    { label: '自动 / 留空', value: '' },
+    { label: '微软邮箱 - Graph', value: 'ms_graph' },
+    { label: '微软邮箱 - IMAP', value: 'ms_imap' },
+    { label: '自建邮箱', value: 'self_built' },
+  ],
   cpa_cleanup_enabled: [
     { label: '关闭', value: '0' },
     { label: '开启', value: '1' },
@@ -55,6 +70,10 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
   codex_proxy_upload_type: [
     { label: 'AT（Access Token，推荐）', value: 'at' },
     { label: 'RT（Refresh Token）', value: 'rt' },
+  ],
+  external_apps_update_mode: [
+    { label: 'latest semver tag（推荐）', value: 'tag' },
+    { label: '分支 HEAD', value: 'branch' },
   ],
 }
 
@@ -144,7 +163,14 @@ const TAB_ITEMS = [
         ],
       },
       {
-        title: 'AppleMail / 小苹果',
+        title: '邮箱导入（微软 / Outlook / Hotmail）',
+        desc: '使用本地导入的微软账号池，运行时支持 Graph / IMAP 轮询（默认 Graph）',
+        fields: [
+          { key: 'outlook_backend', label: '微软收信方式', type: 'select' },
+        ],
+      },
+      {
+        title: '邮箱导入（AppleMail / 小苹果）',
         desc: '读取本地邮箱池文件，通过 refresh_token + client_id 调用小苹果取件接口；支持在本页直接导入 JSON',
         fields: [
           { key: 'applemail_base_url', label: 'API URL', placeholder: 'https://www.appleemail.top' },
@@ -206,7 +232,7 @@ const TAB_ITEMS = [
         fields: [
           { key: 'luckmail_base_url', label: '平台地址', placeholder: 'https://mails.luckyous.com' },
           { key: 'luckmail_api_key', label: 'API Key', secret: true },
-          { key: 'luckmail_email_type', label: '邮箱类型（可选）', placeholder: 'ms_graph / ms_imap / self_built' },
+          { key: 'luckmail_email_type', label: '邮箱类型（可选）', type: 'select' },
           { key: 'luckmail_domain', label: '邮箱域名（可选）', placeholder: 'outlook.com / gmail.com' },
         ],
       },
@@ -389,20 +415,6 @@ interface TabConfig {
   sections: SectionConfig[]
 }
 
-interface AppleMailPoolPreviewItem {
-  index: number
-  email: string
-  mailbox: string
-}
-
-interface AppleMailPoolSnapshot {
-  filename: string
-  pool_dir: string
-  count: number
-  items: AppleMailPoolPreviewItem[]
-  truncated: boolean
-}
-
 const MAILBOX_SECTION_FIELD_KEY_BY_PROVIDER: Record<string, string> = {
   laoudo: 'laoudo_email',
   freemail: 'freemail_api_url',
@@ -410,6 +422,7 @@ const MAILBOX_SECTION_FIELD_KEY_BY_PROVIDER: Record<string, string> = {
   skymail: 'skymail_api_base',
   cloudmail: 'cloudmail_api_base',
   maliapi: 'maliapi_base_url',
+  microsoft: 'outlook_backend',
   applemail: 'applemail_base_url',
   gptmail: 'gptmail_base_url',
   opentrashmail: 'opentrashmail_api_url',
@@ -623,22 +636,24 @@ function CFWorkerDomainPoolSection({ form }: { form: any }) {
       <Form.List name="cfworker_domains">
         {(fields, { add, remove }) => (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {fields.map((field) => (
-              <Space key={field.key} align="start" style={{ display: 'flex' }}>
-                <Form.Item
-                  {...field}
-                  label={field.name === 0 ? '全部域名' : ''}
-                  style={{ flex: 1, marginBottom: 0 }}
-                  rules={[
-                    {
-                      validator: async (_, value) => {
-                        if (!String(value || '').trim()) {
-                          throw new Error('请输入域名')
-                        }
+            {fields.map((field) => {
+              const { key, ...restField } = field
+              return (
+                <Space key={key} align="start" style={{ display: 'flex' }}>
+                  <Form.Item
+                    {...restField}
+                    label={field.name === 0 ? '全部域名' : ''}
+                    style={{ flex: 1, marginBottom: 0 }}
+                    rules={[
+                      {
+                        validator: async (_, value) => {
+                          if (!String(value || '').trim()) {
+                            throw new Error('请输入域名')
+                          }
+                        },
                       },
-                    },
-                  ]}
-                >
+                    ]}
+                  >
                   <Input placeholder="example.com" />
                 </Form.Item>
                 <Button
@@ -660,7 +675,7 @@ function CFWorkerDomainPoolSection({ form }: { form: any }) {
                   删除
                 </Button>
               </Space>
-            ))}
+            )})}
             {fields.length === 0 ? (
               <Typography.Text type="secondary">还没有配置域名。添加后即可在下方选择启用项。</Typography.Text>
             ) : null}
@@ -719,159 +734,6 @@ function CFWorkerDomainPoolSection({ form }: { form: any }) {
       <Typography.Text type="secondary" style={{ display: 'block', marginTop: 12 }}>
         仅已启用域名会参与注册；点击已启用标签可直接移除。
       </Typography.Text>
-    </Card>
-  )
-}
-
-function AppleMailPoolImportSection({ form }: { form: any }) {
-  const [content, setContent] = useState('')
-  const [filename, setFilename] = useState('')
-  const [importing, setImporting] = useState(false)
-  const [snapshot, setSnapshot] = useState<AppleMailPoolSnapshot | null>(null)
-  const [loadingSnapshot, setLoadingSnapshot] = useState(false)
-  const watchedPoolDir = Form.useWatch('applemail_pool_dir', form) || 'mail'
-  const watchedPoolFile = Form.useWatch('applemail_pool_file', form) || ''
-
-  const loadSnapshot = async () => {
-    setLoadingSnapshot(true)
-    try {
-      const params = new URLSearchParams()
-      if (String(watchedPoolDir || '').trim()) {
-        params.set('pool_dir', String(watchedPoolDir || '').trim())
-      }
-      if (String(watchedPoolFile || '').trim()) {
-        params.set('pool_file', String(watchedPoolFile || '').trim())
-      }
-      const result = await apiFetch(`/config/applemail/pool?${params.toString()}`)
-      setSnapshot(result)
-    } catch {
-      setSnapshot(null)
-    } finally {
-      setLoadingSnapshot(false)
-    }
-  }
-
-  useEffect(() => {
-    void loadSnapshot()
-  }, [watchedPoolDir, watchedPoolFile])
-
-  const handleImport = async () => {
-    if (!content.trim()) {
-      message.error('请输入 JSON 或 TXT 内容')
-      return
-    }
-
-    setImporting(true)
-    try {
-      const poolDir = String(form.getFieldValue('applemail_pool_dir') || 'mail').trim() || 'mail'
-      const result = await apiFetch('/config/applemail/import', {
-        method: 'POST',
-        body: JSON.stringify({
-          content,
-          filename,
-          pool_dir: poolDir,
-          bind_to_config: true,
-        }),
-      })
-
-      form.setFieldsValue({
-        mail_provider: 'applemail',
-        applemail_pool_dir: result.pool_dir,
-        applemail_pool_file: result.filename,
-      })
-      setSnapshot({
-        filename: result.filename,
-        pool_dir: result.pool_dir,
-        count: result.count,
-        items: result.items || [],
-        truncated: Boolean(result.truncated),
-      })
-      setContent('')
-      setFilename('')
-      message.success(`导入成功，共 ${result.count} 个邮箱，已绑定 ${result.filename}`)
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'AppleMail 内容导入失败'
-      message.error(errorMessage || 'AppleMail 内容导入失败')
-    } finally {
-      setImporting(false)
-    }
-  }
-
-  return (
-    <Card
-      title="AppleMail 内容导入"
-      extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>支持 JSON 或 TXT；导入后自动绑定当前邮箱池文件</span>}
-      style={{ marginBottom: 16 }}
-    >
-      <Space direction="vertical" style={{ width: '100%' }} size={12}>
-        <Typography.Text type="secondary">
-          支持数组/对象 JSON，也支持 `mail/*.txt` 那种每行一条的 `email----password----client_id----refresh_token` 格式。常见字段别名如 `clientId` / `refreshToken` / `folder` 会自动规范化。
-        </Typography.Text>
-        <Input
-          value={filename}
-          onChange={(event) => setFilename(event.target.value)}
-          placeholder="可选文件名，例如 applemail_hotmail.json；留空自动生成"
-        />
-        <Input.TextArea
-          value={content}
-          onChange={(event) => setContent(event.target.value)}
-          rows={10}
-          placeholder={'[\n  {\n    "email": "demo@example.com",\n    "clientId": "xxxx",\n    "refreshToken": "xxxx",\n    "folder": "INBOX"\n  }\n]\n\n或粘贴 TXT:\ndemo@example.com----password----client_id----refresh_token'}
-          style={{ fontFamily: 'monospace' }}
-        />
-        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-          <Button
-            danger
-            onClick={() => {
-              setContent('')
-              setFilename('')
-            }}
-          >
-            清空
-          </Button>
-          <Space>
-            <Button onClick={() => void loadSnapshot()} loading={loadingSnapshot}>
-              刷新预览
-            </Button>
-            <Button type="primary" onClick={handleImport} loading={importing}>
-              确认导入
-            </Button>
-          </Space>
-        </Space>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          <Tag color="blue">已导入: {snapshot?.count || 0} 个邮箱</Tag>
-          {snapshot?.filename ? <Typography.Text type="secondary">当前文件: {snapshot.filename}</Typography.Text> : null}
-        </div>
-
-        <div
-          style={{
-            border: '1px solid rgba(127,127,127,0.25)',
-            borderRadius: 8,
-            padding: 12,
-            background: 'rgba(127,127,127,0.06)',
-            minHeight: 88,
-            maxHeight: 260,
-            overflowY: 'auto',
-            fontFamily: 'monospace',
-            fontSize: 13,
-            lineHeight: 1.7,
-          }}
-        >
-          {snapshot?.items?.length ? (
-            snapshot.items.map((item) => (
-              <div key={`${item.index}-${item.email}`}>
-                {item.index}. {item.email}
-              </div>
-            ))
-          ) : (
-            <Typography.Text type="secondary">当前还没有可预览的邮箱池内容。</Typography.Text>
-          )}
-        </div>
-        {snapshot?.truncated ? (
-          <Typography.Text type="secondary">预览只展示前 100 个邮箱，完整内容以文件为准。</Typography.Text>
-        ) : null}
-      </Space>
     </Card>
   )
 }
@@ -935,6 +797,7 @@ function IntegrationsPanel() {
   const [items, setItems] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState('')
+  const [updateMode, setUpdateMode] = useState<'tag' | 'branch'>('tag')
   const saved = false
   const [resultModal, setResultModal] = useState({
     open: false,
@@ -955,8 +818,13 @@ function IntegrationsPanel() {
   const load = async () => {
     setLoading(true)
     try {
-      const d = await apiFetch('/integrations/services')
+      const [d, cfg] = await Promise.all([
+        apiFetch('/integrations/services'),
+        apiFetch('/config'),
+      ])
       setItems(d.items || [])
+      const mode = String(cfg?.external_apps_update_mode || 'tag').trim().toLowerCase()
+      setUpdateMode(mode === 'branch' ? 'branch' : 'tag')
     } finally {
       setLoading(false)
     }
@@ -996,6 +864,22 @@ function IntegrationsPanel() {
     } catch (e: any) {
       message.error(e?.message || `${label} 回填失败`)
       showResultModal(`${label} 回填结果`, e?.message || e || `${label} 回填失败`, false)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const updateInstallMode = async (nextMode: 'tag' | 'branch') => {
+    setBusy('update-mode')
+    try {
+      await apiFetch('/config', {
+        method: 'PUT',
+        body: JSON.stringify({ data: { external_apps_update_mode: nextMode } }),
+      })
+      setUpdateMode(nextMode)
+      message.success(nextMode === 'tag' ? '已切换到 tag 模式' : '已切换到分支模式')
+    } catch (e: any) {
+      message.error(e?.message || '切换失败')
     } finally {
       setBusy('')
     }
@@ -1061,6 +945,24 @@ function IntegrationsPanel() {
         </pre>
       </Modal>
 
+      <Card title="安装/更新策略">
+        <Space wrap align="center">
+          <Select
+            style={{ width: 320 }}
+            value={updateMode}
+            options={SELECT_FIELDS.external_apps_update_mode}
+            onChange={(value) => setUpdateMode(value as 'tag' | 'branch')}
+          />
+          <Button
+            type="primary"
+            loading={busy === 'update-mode'}
+            onClick={() => updateInstallMode(updateMode)}
+          >
+            保存策略
+          </Button>
+        </Space>
+      </Card>
+
       <Card title="批量操作">
         <Space wrap>
           <Button loading={busy === 'start-all'} onClick={() => doAction('start-all', apiFetch('/integrations/services/start-all', { method: 'POST' }))}>
@@ -1106,9 +1008,16 @@ function IntegrationsPanel() {
                   loading={busy === `install-${item.name}`}
                   onClick={() => doAction(`install-${item.name}`, apiFetch(`/integrations/services/${item.name}/install`, { method: 'POST' }))}
                 >
-                  安装
+                  安装最新版
                 </Button>
-              ) : null}
+              ) : (
+                <Button
+                  loading={busy === `install-${item.name}`}
+                  onClick={() => doAction(`install-${item.name}`, apiFetch(`/integrations/services/${item.name}/install`, { method: 'POST' }))}
+                >
+                  更新到最新版
+                </Button>
+              )}
               <Button
                 loading={busy === `start-${item.name}`}
                 disabled={!item.repo_exists}
@@ -1121,6 +1030,21 @@ function IntegrationsPanel() {
                 onClick={() => doAction(`stop-${item.name}`, apiFetch(`/integrations/services/${item.name}/stop`, { method: 'POST' }))}
               >
                 停止
+              </Button>
+              <Button
+                danger
+                loading={busy === `uninstall-${item.name}`}
+                disabled={!item.repo_exists}
+                onClick={() => {
+                  const ok = window.confirm(`确认卸载 ${item.label}？\n会停止服务并删除本地插件目录。`)
+                  if (!ok) return
+                  doAction(
+                    `uninstall-${item.name}`,
+                    apiFetch(`/integrations/services/${item.name}/uninstall`, { method: 'POST' }),
+                  )
+                }}
+              >
+                卸载
               </Button>
               {item.name === 'grok2api' ? (
                 <Button
@@ -1433,74 +1357,6 @@ function ContributionPanel({
   )
 }
 
-function OutlookImportSection() {
-  const { message: msg } = App.useApp()
-  const [value, setValue] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState<any | null>(null)
-
-  const handleSubmit = async () => {
-    const payload = String(value || '').trim()
-    if (!payload) {
-      msg.error('请输入 Outlook 账号内容')
-      return
-    }
-    setLoading(true)
-    try {
-      const res = await apiFetch('/outlook/batch-import', {
-        method: 'POST',
-        body: JSON.stringify({ data: payload, enabled: true }),
-      })
-      setResult(res)
-      msg.success(`导入完成：成功 ${res.success} / 失败 ${res.failed}`)
-    } catch (e: any) {
-      msg.error(e?.message || '导入失败')
-      setResult({ error: e?.message || String(e) })
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <Card
-      title="Outlook 批量导入"
-      extra={<span style={{ fontSize: 12, color: '#7a8ba3' }}>每行格式：邮箱----密码 或 邮箱----密码----client_id----refresh_token</span>}
-      style={{ marginBottom: 16 }}
-    >
-      <Input.TextArea
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder={`example@outlook.com----password\nexample@outlook.com----password----client_id----refresh_token`}
-        autoSize={{ minRows: 6, maxRows: 14 }}
-      />
-      <Space style={{ marginTop: 12 }}>
-        <Button type="primary" loading={loading} onClick={handleSubmit}>
-          导入
-        </Button>
-        <Button onClick={() => { setValue(''); setResult(null) }}>
-          清空
-        </Button>
-      </Space>
-      {result ? (
-        <div style={{ marginTop: 12 }}>
-          {'success' in result ? (
-            <Alert
-              type={result.failed ? 'warning' : 'success'}
-              showIcon
-              message={`导入完成：成功 ${result.success} / 失败 ${result.failed}`}
-              description={result.errors && result.errors.length ? (
-                <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{result.errors.join('\n')}</pre>
-              ) : undefined}
-            />
-          ) : (
-            <Alert type="error" showIcon message="导入失败" description={String(result.error || '')} />
-          )}
-        </div>
-      ) : null}
-    </Card>
-  )
-}
-
 type TotpSetupState = 'idle' | 'setup'
 
 function SecurityPanel() {
@@ -1750,13 +1606,17 @@ export default function Settings() {
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [activeTab, setActiveTab] = useState('register')
-  const currentMailProvider = String(Form.useWatch('mail_provider', form) || '')
+  const currentMailProviderRaw = String(Form.useWatch('mail_provider', form) || '')
+  const currentMailImportSource = String(Form.useWatch('mail_import_source', form) || 'microsoft')
+  const currentMailProvider = resolveEffectiveMailProvider(currentMailProviderRaw, currentMailImportSource)
   const showFloatingSaveButton = activeTab === 'mailbox' || activeTab === 'chatgpt'
   const contentPaneRef = useRef<HTMLDivElement | null>(null)
   const [floatingSaveBounds, setFloatingSaveBounds] = useState<{ left: number; width: number } | null>(null)
 
   useEffect(() => {
     apiFetch('/config').then((data) => {
+      const configMailProvider = String(data.mail_provider || 'luckmail')
+      const isMailImportProvider = configMailProvider === 'microsoft' || configMailProvider === 'outlook' || configMailProvider === 'applemail'
       if (!data.mail_provider) {
         data.mail_provider = 'luckmail'
       }
@@ -1769,6 +1629,9 @@ export default function Settings() {
       if (!data.applemail_mailboxes) {
         data.applemail_mailboxes = 'INBOX,Junk'
       }
+      if (!data.outlook_backend) {
+        data.outlook_backend = 'graph'
+      }
       if (!data.gptmail_base_url) {
         data.gptmail_base_url = 'https://mail.chatgpt.org.uk'
       }
@@ -1777,6 +1640,9 @@ export default function Settings() {
       }
       if (!data.luckmail_base_url) {
         data.luckmail_base_url = 'https://mails.luckyous.com/'
+      }
+      if (!String(data.contribution_enabled ?? '').trim()) {
+        data.contribution_enabled = false
       }
       if (!data.contribution_server_url) {
         data.contribution_server_url = 'http://new.xem8k5.top:7317/'
@@ -1797,6 +1663,8 @@ export default function Settings() {
       data.cfworker_random_subdomain = parseBooleanConfigValue(data.cfworker_random_subdomain)
       data.cfworker_random_name_subdomain = parseBooleanConfigValue(data.cfworker_random_name_subdomain)
       data.contribution_enabled = parseBooleanConfigValue(data.contribution_enabled)
+      data.mail_import_source = configMailProvider === 'applemail' ? 'applemail' : 'microsoft'
+      data.mail_provider = isMailImportProvider ? 'mail_import' : configMailProvider
       form.setFieldsValue(data)
     })
   }, [form])
@@ -1838,6 +1706,8 @@ export default function Settings() {
     setSaving(true)
     try {
       const values = form.getFieldsValue(true)
+      values.mail_provider = resolveEffectiveMailProvider(values.mail_provider, values.mail_import_source)
+      delete values.mail_import_source
       const domains = normalizeDomainList(values.cfworker_domains)
       const enabledDomains = normalizeDomainList(values.cfworker_enabled_domains).filter((domain) => domains.includes(domain))
 
@@ -1860,6 +1730,8 @@ export default function Settings() {
 
       await apiFetch('/config', { method: 'PUT', body: JSON.stringify({ data: values }) })
       form.setFieldsValue({
+        mail_provider: values.mail_provider === 'microsoft' || values.mail_provider === 'applemail' ? 'mail_import' : values.mail_provider,
+        mail_import_source: values.mail_provider === 'applemail' ? 'applemail' : 'microsoft',
         cpa_enabled: values.cpa_enabled,
         sub2api_enabled: values.sub2api_enabled,
         cfworker_domains: domains,
@@ -1962,15 +1834,12 @@ export default function Settings() {
                       {mailboxSections.selectedSection ? (
                         <ConfigSection key={`${mailboxSections.selectedSection.title}-selected`} section={mailboxSections.selectedSection} />
                       ) : null}
-                      {currentMailProvider === 'applemail' ? <AppleMailPoolImportSection form={form} /> : null}
-                      {currentMailProvider === 'cfworker' ? <CFWorkerDomainPoolSection form={form} /> : null}
-                      {currentMailProvider === 'outlook' ? <OutlookImportSection /> : null}
+                      <MailImportPanel form={form} />
+                      {currentMailProviderRaw === 'cfworker' ? <CFWorkerDomainPoolSection form={form} /> : null}
                       {mailboxSections.remainingSections.map((section) => (
                         <ConfigSection key={section.title} section={section} />
                       ))}
-                      {currentMailProvider !== 'applemail' ? <AppleMailPoolImportSection form={form} /> : null}
-                      {currentMailProvider !== 'cfworker' ? <CFWorkerDomainPoolSection form={form} /> : null}
-                      {currentMailProvider !== 'outlook' ? <OutlookImportSection /> : null}
+                      {currentMailProviderRaw !== 'cfworker' ? <CFWorkerDomainPoolSection form={form} /> : null}
                     </>
                   ) : (
                     currentTab.sections.map((section) => (
